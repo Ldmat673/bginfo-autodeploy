@@ -3,18 +3,19 @@
     Configures and validates permissions for the BGInfo installation folder.
 
 .DESCRIPTION
-    Applies secure permissions to C:\BGInfo so BGInfo can be used
-    by all local Windows user sessions.
+    Creates a controlled ACL for C:\BGInfo.
 
-    Permissions:
+    Required permissions:
         SYSTEM         - Full Control
         Administrators - Full Control
         Users           - Read and Execute
 
+    Inheritance from C:\ is disabled.
+
 .NOTES
     Project: BGInfo AutoDeploy
     Component: Set-BGInfoACL
-    Version: 0.1
+    Version: 0.2
 #>
 
 #Requires -RunAsAdministrator
@@ -30,12 +31,12 @@ Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 
 # ------------------------------------------------------------
-# Validate folder
+# Create folder if necessary
 # ------------------------------------------------------------
 
 if (-not (Test-Path -LiteralPath $BGInfoFolder)) {
 
-    Write-Host "[INFO] BGInfo folder does not exist. Creating..." -ForegroundColor Yellow
+    Write-Host "[INFO] Creating $BGInfoFolder..." -ForegroundColor Yellow
 
     New-Item `
         -Path $BGInfoFolder `
@@ -45,9 +46,9 @@ if (-not (Test-Path -LiteralPath $BGInfoFolder)) {
 
 Write-Host "[OK] BGInfo folder exists: $BGInfoFolder" -ForegroundColor Green
 
+
 # ------------------------------------------------------------
-# Resolve well-known SIDs
-# This avoids problems with localized Windows installations
+# Resolve Windows built-in accounts using SIDs
 # ------------------------------------------------------------
 
 $SystemSID = New-Object System.Security.Principal.SecurityIdentifier(
@@ -78,22 +79,25 @@ Write-Host "[OK] SYSTEM resolved         : $SystemAccount" -ForegroundColor Gree
 Write-Host "[OK] Administrators resolved : $AdministratorsAccount" -ForegroundColor Green
 Write-Host "[OK] Users resolved          : $UsersAccount" -ForegroundColor Green
 
-# ------------------------------------------------------------
-# Get current ACL
-# ------------------------------------------------------------
-
-$ACL = Get-Acl -LiteralPath $BGInfoFolder
-
-# Disable inheritance and remove inherited permissions.
-# BGInfo files are managed only by Administrators and SYSTEM.
-$ACL.SetAccessRuleProtection($true, $false)
 
 # ------------------------------------------------------------
-# Define required rules
+# Create clean ACL
 # ------------------------------------------------------------
+
+Write-Host ""
+Write-Host "[INFO] Creating controlled ACL..." -ForegroundColor Cyan
+
+$ACL = New-Object System.Security.AccessControl.DirectorySecurity
+
+# Disable inheritance
+$ACL.SetAccessRuleProtection(
+    $true,
+    $false
+)
 
 $InheritanceFlags = `
-    [System.Security.AccessControl.InheritanceFlags]"ContainerInherit, ObjectInherit"
+    [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+    [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
 
 $PropagationFlags = `
     [System.Security.AccessControl.PropagationFlags]::None
@@ -101,29 +105,54 @@ $PropagationFlags = `
 $Allow = `
     [System.Security.AccessControl.AccessControlType]::Allow
 
-$SystemRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-    $SystemAccount,
-    [System.Security.AccessControl.FileSystemRights]::FullControl,
-    $InheritanceFlags,
-    $PropagationFlags,
-    $Allow
-)
 
-$AdministratorsRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-    $AdministratorsAccount,
-    [System.Security.AccessControl.FileSystemRights]::FullControl,
-    $InheritanceFlags,
-    $PropagationFlags,
-    $Allow
-)
+# ------------------------------------------------------------
+# SYSTEM - Full Control
+# ------------------------------------------------------------
 
-$UsersRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-    $UsersAccount,
-    [System.Security.AccessControl.FileSystemRights]::ReadAndExecute,
-    $InheritanceFlags,
-    $PropagationFlags,
-    $Allow
-)
+$SystemRule = New-Object `
+    System.Security.AccessControl.FileSystemAccessRule(
+        $SystemAccount,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        $InheritanceFlags,
+        $PropagationFlags,
+        $Allow
+    )
+
+$ACL.AddAccessRule($SystemRule)
+
+
+# ------------------------------------------------------------
+# Administrators - Full Control
+# ------------------------------------------------------------
+
+$AdministratorsRule = New-Object `
+    System.Security.AccessControl.FileSystemAccessRule(
+        $AdministratorsAccount,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        $InheritanceFlags,
+        $PropagationFlags,
+        $Allow
+    )
+
+$ACL.AddAccessRule($AdministratorsRule)
+
+
+# ------------------------------------------------------------
+# Users - Read and Execute
+# ------------------------------------------------------------
+
+$UsersRule = New-Object `
+    System.Security.AccessControl.FileSystemAccessRule(
+        $UsersAccount,
+        [System.Security.AccessControl.FileSystemRights]::ReadAndExecute,
+        $InheritanceFlags,
+        $PropagationFlags,
+        $Allow
+    )
+
+$ACL.AddAccessRule($UsersRule)
+
 
 # ------------------------------------------------------------
 # Apply ACL
@@ -131,48 +160,49 @@ $UsersRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
 
 try {
 
-    $ACL.SetAccessRule($SystemRule)
-    $ACL.SetAccessRule($AdministratorsRule)
-    $ACL.SetAccessRule($UsersRule)
-
     Set-Acl `
         -LiteralPath $BGInfoFolder `
         -AclObject $ACL
 
-    Write-Host ""
-    Write-Host "[OK] BGInfo ACL configured successfully" -ForegroundColor Green
+    Write-Host "[OK] Controlled ACL applied successfully" -ForegroundColor Green
 
 }
 catch {
 
     Write-Host ""
-    Write-Host "[ERROR] Unable to configure BGInfo ACL." -ForegroundColor Red
+    Write-Host "[ERROR] Failed to configure ACL." -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
 
     exit 1
 }
 
+
 # ------------------------------------------------------------
-# Validate ACL
+# Validate
 # ------------------------------------------------------------
 
 Write-Host ""
 Write-Host "Validating permissions..." -ForegroundColor Cyan
 Write-Host ""
 
-$ValidatedACL = Get-Acl -LiteralPath $BGInfoFolder
+$ResultACL = Get-Acl -LiteralPath $BGInfoFolder
 
-$RequiredAccounts = @(
-    $SystemAccount.Value,
-    $AdministratorsAccount.Value,
-    $UsersAccount.Value
-)
+$ExpectedPermissions = @{
 
-foreach ($Account in $RequiredAccounts) {
+    $SystemAccount.Value = "FullControl"
 
-    $Rules = $ValidatedACL.Access |
+    $AdministratorsAccount.Value = "FullControl"
+
+    $UsersAccount.Value = "ReadAndExecute"
+}
+
+
+foreach ($Account in $ExpectedPermissions.Keys) {
+
+    $Rules = $ResultACL.Access |
         Where-Object {
-            $_.IdentityReference.Value -eq $Account
+            $_.IdentityReference.Value -eq $Account -and
+            $_.IsInherited -eq $false
         }
 
     if ($Rules) {
@@ -180,19 +210,38 @@ foreach ($Account in $RequiredAccounts) {
         foreach ($Rule in $Rules) {
 
             Write-Host "[OK] $($Rule.IdentityReference)" -ForegroundColor Green
-            Write-Host "     Rights : $($Rule.FileSystemRights)"
-            Write-Host "     Type   : $($Rule.AccessControlType)"
+            Write-Host "     Rights    : $($Rule.FileSystemRights)"
+            Write-Host "     Type      : $($Rule.AccessControlType)"
+            Write-Host "     Inherited : $($Rule.IsInherited)"
         }
 
     }
     else {
 
-        Write-Host "[WARNING] ACL entry not found: $Account" -ForegroundColor Yellow
+        Write-Host "[ERROR] Missing ACL: $Account" -ForegroundColor Red
     }
 }
 
+
 # ------------------------------------------------------------
-# Final result
+# Check inheritance
+# ------------------------------------------------------------
+
+Write-Host ""
+
+if ($ResultACL.AreAccessRulesProtected) {
+
+    Write-Host "[OK] ACL inheritance disabled" -ForegroundColor Green
+
+}
+else {
+
+    Write-Host "[ERROR] ACL inheritance is still enabled" -ForegroundColor Red
+}
+
+
+# ------------------------------------------------------------
+# Final output
 # ------------------------------------------------------------
 
 Write-Host ""
@@ -205,8 +254,12 @@ Write-Host "Folder:"
 Write-Host "  $BGInfoFolder"
 Write-Host ""
 
-Write-Host "Required permissions:"
+Write-Host "Permissions:"
 Write-Host "  SYSTEM         : Full Control"
 Write-Host "  Administrators : Full Control"
 Write-Host "  Users          : Read and Execute"
+Write-Host ""
+
+Write-Host "Inheritance:"
+Write-Host "  Disabled"
 Write-Host ""
