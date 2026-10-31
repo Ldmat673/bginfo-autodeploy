@@ -84,9 +84,9 @@ Write-Host "[OK] Users resolved          : $UsersAccount" -ForegroundColor Green
 
 $ACL = Get-Acl -LiteralPath $BGInfoFolder
 
-# Keep inheritance enabled.
-# Existing Windows inherited permissions remain available.
-$ACL.SetAccessRuleProtection($false, $true)
+# Disable inheritance and remove inherited permissions.
+# BGInfo files are managed only by Administrators and SYSTEM.
+$ACL.SetAccessRuleProtection($true, $false)
 
 # ------------------------------------------------------------
 # Define required rules
