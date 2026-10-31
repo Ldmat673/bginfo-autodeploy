@@ -250,5 +250,5 @@ Write-Host "  $BGInfoExecutable"
 Write-Host ""
 
 Write-Host "Version:"
-Write-Host " oVersion"
+Write-Host "  $BGInfoVersion"
 Write-Host ""
