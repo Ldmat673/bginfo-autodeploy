@@ -43,7 +43,6 @@ $RepoName   = "bginfo-autodeploy"
 $RepoBranch = "main"
 
 $RepoRaw   = "https://raw.githubusercontent.com/$RepoOwner/$RepoName/$RepoBranch"
-$GitHubAPI = "https://api.github.com/repos/$RepoOwner/$RepoName/contents"
 
 $BGInfoURL = "https://download.sysinternals.com/files/BGInfo.zip"
 $BGInfoZIP = Join-Path $env:TEMP "BGInfo.zip"
@@ -156,41 +155,6 @@ function Test-JPEG {
     }
 }
 
-function Get-WallpaperCollection {
-
-    param(
-        [Parameter(Mandatory)]
-        [string]$RelativePath
-    )
-
-    $EncodedPath = $RelativePath.Replace("\", "/")
-    $APIURL = "$GitHubAPI/$EncodedPath" + "?ref=$RepoBranch"
-
-    try {
-
-        $Headers = @{
-            Accept       = "application/vnd.github+json"
-            "User-Agent" = "BGInfo-AutoDeploy"
-        }
-
-        $Results = Invoke-RestMethod `
-            -Uri $APIURL `
-            -Headers $Headers `
-            -Method Get `
-            -ErrorAction Stop
-
-        return @(
-            $Results |
-                Where-Object {
-                    $_.type -eq "file" -and
-                    $_.name -match "(?i)^wallpaper-\d+\.(jpg|jpeg)$"
-                }
-        )
-    }
-    catch {
-        return @()
-    }
-}
 
 function Set-BGInfoControlledACL {
 
@@ -634,106 +598,108 @@ Write-Section "Wallpaper Selection"
 
 $WallpaperPaths = @()
 
+# Preferred manufacturer/family collection.
 if ($Brand -ne "Generic" -and $Family -ne "Generic") {
     $WallpaperPaths += "Wallpapers/$Brand/$Family"
 }
 
+# Manufacturer fallback.
 if ($Brand -ne "Generic") {
     $WallpaperPaths += "Wallpapers/$Brand/Generic"
 }
 
+# Global fallback.
 $WallpaperPaths += "Wallpapers/Generic"
 
 $SelectedCollection = $null
-$WallpaperItems = @()
-
-foreach ($Path in $WallpaperPaths) {
-
-    Write-Info "Checking $Path"
-
-    $Results = Get-WallpaperCollection -RelativePath $Path
-
-    if ($Results.Count -gt 0) {
-
-        $SelectedCollection = $Path
-        $WallpaperItems = $Results
-
-        Write-OK "Wallpaper collection found: $Path"
-        break
-    }
-}
-
-if ($WallpaperItems.Count -eq 0) {
-    Stop-Deployment "No wallpaper collection was found."
-}
-
-Write-OK "Wallpaper files available: $($WallpaperItems.Count)"
-
-# Randomize candidate order.
-$ShuffledWallpapers = $WallpaperItems | Sort-Object { Get-Random }
-
+$SelectedWallpaper  = $null
 $ValidWallpaperFound = $false
 
-foreach ($WallpaperItem in $ShuffledWallpapers) {
+# Supports up to 20 wallpapers per collection.
+$WallpaperCandidates = 1..20 | ForEach-Object {
+    "wallpaper-{0:D2}.jpg" -f $_
+}
 
-    $TemporaryWallpaper = Join-Path `
-        $env:TEMP `
-        ("BGInfo-" + $WallpaperItem.name)
+foreach ($Collection in $WallpaperPaths) {
 
-    Remove-Item `
-        -LiteralPath $TemporaryWallpaper `
-        -Force `
-        -ErrorAction SilentlyContinue
+    Write-Info "Checking $Collection"
 
-    Write-Info "Testing $($WallpaperItem.name)"
+    # Randomize the wallpapers so each deployment can select a different one.
+    $RandomCandidates = $WallpaperCandidates | Sort-Object { Get-Random }
 
-    try {
+    foreach ($WallpaperName in $RandomCandidates) {
 
-        Invoke-Download `
-            -Uri $WallpaperItem.download_url `
-            -Destination $TemporaryWallpaper
+        $WallpaperURL = "$RepoRaw/$Collection/$WallpaperName"
 
-        if (Test-JPEG -Path $TemporaryWallpaper) {
-
-            Copy-Item `
-                -LiteralPath $TemporaryWallpaper `
-                -Destination $WallpaperFile `
-                -Force
-
-            $SelectedWallpaper = $WallpaperItem.name
-            $ValidWallpaperFound = $true
-
-            Write-OK "Valid JPEG selected: $SelectedWallpaper"
-
-            break
-        }
-        else {
-
-            Write-WarningMessage "$($WallpaperItem.name) is not a real JPEG. Skipping."
-        }
-    }
-    catch {
-
-        Write-WarningMessage "Unable to download $($WallpaperItem.name)"
-    }
-    finally {
+        $TemporaryWallpaper = Join-Path `
+            $env:TEMP `
+            ("BGInfo-" + $WallpaperName)
 
         Remove-Item `
             -LiteralPath $TemporaryWallpaper `
             -Force `
             -ErrorAction SilentlyContinue
+
+        try {
+
+            Invoke-WebRequest `
+                -Uri $WallpaperURL `
+                -OutFile $TemporaryWallpaper `
+                -UseBasicParsing `
+                -ErrorAction Stop
+
+            # Make sure GitHub actually returned a valid JPEG.
+            if (Test-JPEG -Path $TemporaryWallpaper) {
+
+                Copy-Item `
+                    -LiteralPath $TemporaryWallpaper `
+                    -Destination $WallpaperFile `
+                    -Force
+
+                $SelectedCollection  = $Collection
+                $SelectedWallpaper   = $WallpaperName
+                $ValidWallpaperFound = $true
+
+                Write-OK "Wallpaper collection: $Collection"
+                Write-OK "Valid JPEG selected: $WallpaperName"
+
+                break
+            }
+            else {
+
+                Write-WarningMessage "$WallpaperName is not a real JPEG. Skipping."
+            }
+        }
+        catch {
+
+            # Normally means that candidate does not exist.
+            # Silently continue searching.
+        }
+        finally {
+
+            Remove-Item `
+                -LiteralPath $TemporaryWallpaper `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($ValidWallpaperFound) {
+        break
     }
 }
 
 if (-not $ValidWallpaperFound) {
-    Stop-Deployment "The wallpaper collection contains no valid JPEG images."
+
+    Stop-Deployment "No valid wallpaper was found in any collection."
 }
 
 if (-not (Test-JPEG -Path $WallpaperFile)) {
+
     Stop-Deployment "Final wallpaper validation failed."
 }
 
-Write-OK "Wallpaper installed as $WallpaperFile"
+Write-OK "Wallpaper installed: $WallpaperFile"
 
 # ============================================================
 # AutoStart Configuration
